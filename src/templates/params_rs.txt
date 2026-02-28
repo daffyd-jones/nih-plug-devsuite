@@ -1,0 +1,172 @@
+use nih_plug::prelude::*;
+use nih_plug_egui::EguiState;
+use std::sync::Arc;
+
+#[derive(Params)]
+pub struct PluginParams {
+    #[persist = "editor-state"]
+    pub editor_state: Arc<EguiState>,
+
+    // --- Knobs (FloatParam) ---
+    #[id = "knob1"]
+    pub knob1: FloatParam,
+
+    #[id = "knob2"]
+    pub knob2: FloatParam,
+
+    #[id = "knob3"]
+    pub knob3: FloatParam,
+
+    #[id = "knob4"]
+    pub knob4: FloatParam,
+
+    #[id = "knob5"]
+    pub knob5: FloatParam,
+
+    #[id = "knob6"]
+    pub knob6: FloatParam,
+
+    #[id = "knob7"]
+    pub knob7: FloatParam,
+
+    #[id = "knob8"]
+    pub knob8: FloatParam,
+
+    // --- Sliders (FloatParam with different range/unit) ---
+    #[id = "slider1"]
+    pub slider1: FloatParam,
+
+    #[id = "slider2"]
+    pub slider2: FloatParam,
+
+    #[id = "slider3"]
+    pub slider3: FloatParam,
+
+    #[id = "slider4"]
+    pub slider4: FloatParam,
+
+    // --- Buttons / Toggles (BoolParam) ---
+    #[id = "button1"]
+    pub button1: BoolParam,
+
+    #[id = "button2"]
+    pub button2: BoolParam,
+
+    #[id = "button3"]
+    pub button3: BoolParam,
+
+    #[id = "button4"]
+    pub button4: BoolParam,
+}
+
+impl Default for PluginParams {
+    fn default() -> Self {
+        Self {
+            editor_state: EguiState::from_size(800, 600),
+
+            // Knobs default to 0.0..=1.0, centre 0.5
+            knob1: FloatParam::new(
+                "Knob 1",
+                1.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            knob2: FloatParam::new(
+                "Knob 2",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            knob3: FloatParam::new(
+                "Knob 3",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            knob4: FloatParam::new(
+                "Knob 4",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            knob5: FloatParam::new(
+                "Knob 5",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            knob6: FloatParam::new(
+                "Knob 6",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            knob7: FloatParam::new(
+                "Knob 7",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            knob8: FloatParam::new(
+                "Knob 8",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            // Sliders default to 0.0..=1.0
+            slider1: FloatParam::new(
+                "Slider 1",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            slider2: FloatParam::new(
+                "Slider 2",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            slider3: FloatParam::new(
+                "Slider 3",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            slider4: FloatParam::new(
+                "Slider 4",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            // Buttons default to off
+            button1: BoolParam::new("Button 1", false),
+            button2: BoolParam::new("Button 2", false),
+            button3: BoolParam::new("Button 3", false),
+            button4: BoolParam::new("Button 4", false),
+        }
+    }
+}

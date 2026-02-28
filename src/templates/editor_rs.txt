@@ -1,0 +1,164 @@
+use nih_plug::prelude::*;
+use nih_plug_egui::{create_egui_editor, egui, EguiState};
+use std::sync::Arc;
+
+use crate::params::PluginParams;
+
+pub fn create(
+    params: Arc<PluginParams>,
+    editor_state: Arc<EguiState>,
+) -> Option<Box<dyn Editor>> {
+    create_egui_editor(
+        editor_state,
+        (),
+        |_, _| {},
+        move |egui_ctx, setter, _state| {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::default()
+                        .fill(egui::Color32::from_rgb(30, 30, 30))
+                        .inner_margin(egui::Margin::same(16)),
+                )
+                .show(egui_ctx, |ui| {
+                    ui.vertical(|ui| {
+                        ui.heading("Plugin");
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        // --- Knobs row 1 (knob1 - knob4) ---
+                        ui.label("Knobs");
+                        ui.horizontal(|ui| {
+                            knob_widget(ui, setter, &params.knob1, "Knob 1");
+                            knob_widget(ui, setter, &params.knob2, "Knob 2");
+                            knob_widget(ui, setter, &params.knob3, "Knob 3");
+                            knob_widget(ui, setter, &params.knob4, "Knob 4");
+                        });
+
+                        ui.add_space(4.0);
+
+                        // --- Knobs row 2 (knob5 - knob8) ---
+                        ui.horizontal(|ui| {
+                            knob_widget(ui, setter, &params.knob5, "Knob 5");
+                            knob_widget(ui, setter, &params.knob6, "Knob 6");
+                            knob_widget(ui, setter, &params.knob7, "Knob 7");
+                            knob_widget(ui, setter, &params.knob8, "Knob 8");
+                        });
+
+                        ui.add_space(12.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        // --- Sliders ---
+                        ui.label("Sliders");
+                        ui.vertical(|ui| {
+                            slider_widget(ui, setter, &params.slider1, "Slider 1");
+                            slider_widget(ui, setter, &params.slider2, "Slider 2");
+                            slider_widget(ui, setter, &params.slider3, "Slider 3");
+                            slider_widget(ui, setter, &params.slider4, "Slider 4");
+                        });
+
+                        ui.add_space(12.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        // --- Buttons ---
+                        ui.label("Buttons");
+                        ui.horizontal(|ui| {
+                            button_widget(ui, setter, &params.button1, "Button 1");
+                            button_widget(ui, setter, &params.button2, "Button 2");
+                            button_widget(ui, setter, &params.button3, "Button 3");
+                            button_widget(ui, setter, &params.button4, "Button 4");
+                        });
+                    });
+                });
+        },
+    )
+}
+
+/// A simple rotary-style knob using egui's drag value, labelled below.
+fn knob_widget(
+    ui: &mut egui::Ui,
+    setter: &ParamSetter,
+    param: &FloatParam,
+    label: &str,
+) {
+    ui.vertical(|ui| {
+        ui.set_width(80.0);
+        let mut value = param.value();
+        let range = param.range();
+        let (min, max) = float_range_bounds(&range);
+
+        let drag = egui::DragValue::new(&mut value)
+            .range(min..=max)
+            .speed((max - min) / 200.0)
+            .fixed_decimals(2);
+
+        if ui.add(drag).changed() {
+            setter.begin_set_parameter(param);
+            setter.set_parameter(param, value);
+            setter.end_set_parameter(param);
+        }
+        ui.label(egui::RichText::new(label).size(11.0));
+    });
+}
+
+/// A horizontal slider.
+fn slider_widget(
+    ui: &mut egui::Ui,
+    setter: &ParamSetter,
+    param: &FloatParam,
+    label: &str,
+) {
+    ui.horizontal(|ui| {
+        ui.set_width(400.0);
+        ui.label(egui::RichText::new(label).size(11.0));
+        let mut value = param.value();
+        let range = param.range();
+        let (min, max) = float_range_bounds(&range);
+
+        let slider = egui::Slider::new(&mut value, min..=max)
+            .fixed_decimals(2);
+
+        if ui.add(slider).changed() {
+            setter.begin_set_parameter(param);
+            setter.set_parameter(param, value);
+            setter.end_set_parameter(param);
+        }
+    });
+}
+
+/// A toggle button.
+fn button_widget(
+    ui: &mut egui::Ui,
+    setter: &ParamSetter,
+    param: &BoolParam,
+    label: &str,
+) {
+    let mut value = param.value();
+    let text = egui::RichText::new(label)
+        .size(12.0)
+        .color(if value {
+            egui::Color32::from_rgb(100, 255, 100)
+        } else {
+            egui::Color32::from_rgb(180, 180, 180)
+        });
+
+    if ui.toggle_value(&mut value, text).changed() {
+        setter.begin_set_parameter(param);
+        setter.set_parameter(param, value);
+        setter.end_set_parameter(param);
+    }
+}
+
+/// Extract (min, max) from a FloatRange.
+fn float_range_bounds(range: &FloatRange) -> (f32, f32) {
+    match range {
+        FloatRange::Linear { min, max } => (*min, *max),
+        FloatRange::Reversed(inner) => {
+            let (min, max) = float_range_bounds(inner);
+            (min, max)
+        }
+        FloatRange::Skewed { min, max, .. } => (*min, *max),
+        FloatRange::SymmetricalSkewed { min, max, .. } => (*min, *max),
+    }
+}
