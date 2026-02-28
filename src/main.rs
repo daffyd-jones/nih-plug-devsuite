@@ -1,5 +1,8 @@
 mod app;
+mod audio_engine;
 mod build_system;
+mod midi_engine;
+// mod plugin_host;
 mod project;
 mod scaffolding;
 mod templates;
