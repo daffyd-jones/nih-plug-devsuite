@@ -1,13 +1,18 @@
 #![allow(unsafe_code)]
 
 use crate::plugin_host::handlers::{DevHostMainThread, DevHostShared};
-use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiError, GuiSize, PluginGui};
+use clack_extensions::gui::{
+    GuiApiType, GuiConfiguration, GuiError, GuiSize, PluginGui, Window as ClapWindow,
+};
 use clack_host::prelude::*;
 
 pub struct Gui {
-    plugin_gui: PluginGui,
+    pub plugin_gui: PluginGui,
     pub configuration: Option<GuiConfiguration<'static>>,
     is_open: bool,
+    pub is_resizable: bool,
+    /// Size reported by the plugin at creation time
+    pub initial_size: Option<GuiSize>,
 }
 
 impl Gui {
@@ -18,6 +23,8 @@ impl Gui {
             configuration: config,
             plugin_gui,
             is_open: false,
+            is_resizable: false,
+            initial_size: None,
         }
     }
 
@@ -25,163 +32,114 @@ impl Gui {
         gui: &PluginGui,
         plugin: &mut PluginMainThreadHandle,
     ) -> Option<GuiConfiguration<'static>> {
-        // Check if we're running on Wayland
-        let is_wayland = cfg!(target_os = "linux") && 
-            (std::env::var("WAYLAND_DISPLAY").is_ok() || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland"));
-        
-        if is_wayland {
-            println!("[gui] Detected Wayland environment - floating GUI only");
-        }
+        let api_type = GuiApiType::default_for_current_platform()?;
 
-        // Get the default API type for the platform
-        let api_type = match GuiApiType::default_for_current_platform() {
-            Some(api) => api,
-            None => {
-                println!("[gui] No default GUI API available for this platform");
-                return None;
-            }
-        };
-
-        if is_wayland {
-            // On Wayland, only try floating (embedding not supported)
-            let config = GuiConfiguration {
-                api_type,
-                is_floating: true,
-            };
-            if gui.is_api_supported(plugin, config) {
-                println!("[gui] Plugin supports floating GUI on Wayland with {:?}", api_type);
-                return Some(config);
-            } else {
-                println!("[gui] Plugin does not support floating GUI on Wayland");
-                return None;
-            }
-        }
-
-        // On X11 or other platforms, try embedded first, then floating
-        // Try embedded first (preferred)
-        let config = GuiConfiguration {
+        let embedded = GuiConfiguration {
             api_type,
             is_floating: false,
         };
-        if gui.is_api_supported(plugin, config) {
+        if gui.is_api_supported(plugin, embedded) {
             println!("[gui] Plugin supports embedded GUI with {:?}", api_type);
-            return Some(config);
+            return Some(embedded);
         }
 
-        // Fall back to floating
-        let config = GuiConfiguration {
+        let floating = GuiConfiguration {
             api_type,
             is_floating: true,
         };
-        if gui.is_api_supported(plugin, config) {
+        if gui.is_api_supported(plugin, floating) {
             println!("[gui] Plugin supports floating GUI with {:?}", api_type);
-            return Some(config);
+            return Some(floating);
         }
 
         println!("[gui] Plugin does not support any GUI API");
         None
     }
 
-    /// Returns `Some(true)` if floating, `Some(false)` if embedded, `None` if no GUI.
     pub fn needs_floating(&self) -> Option<bool> {
         self.configuration.map(|c| c.is_floating)
     }
 
-    /// Open the plugin's GUI as an embedded window.
-    /// This is the preferred method when supported.
-    pub fn open_embedded(&mut self, plugin: &mut PluginMainThreadHandle) -> Result<(), GuiError> {
-        println!("[gui] Attempting to open embedded GUI");
-        
+    /// Open as embedded, parenting into the provided raw window handle.
+    ///
+    /// Returns the size the plugin wants to occupy, so the caller can
+    /// resize its container accordingly.
+    ///
+    /// # Safety
+    /// The caller must ensure the parent window outlives this GUI.
+    pub unsafe fn open_embedded(
+        &mut self,
+        plugin: &mut PluginMainThreadHandle,
+        parent: ClapWindow,
+    ) -> Result<GuiSize, GuiError> {
         let configuration = match self.configuration {
             Some(c) if !c.is_floating => c,
             _ => {
-                println!("[gui] No embedded GUI configuration available");
+                println!("[gui] No embedded configuration available");
                 return Err(GuiError::CreateError);
             }
         };
 
-        println!("[gui] Creating embedded GUI with API type: {:?}", configuration.api_type);
-        match self.plugin_gui.create(plugin, configuration) {
-            Ok(()) => {
-                println!("[gui] GUI created successfully");
-            }
-            Err(e) => {
-                println!("[gui] Failed to create GUI: {:?}", e);
-                return Err(e);
-            }
+        self.plugin_gui.create(plugin, configuration)?;
+
+        // Check resize capability before set_parent
+        self.is_resizable = self.plugin_gui.can_resize(plugin);
+
+        // Get plugin's preferred size (fall back to a sane default)
+        let size = self.plugin_gui.get_size(plugin).unwrap_or(GuiSize {
+            width: 640,
+            height: 480,
+        });
+        self.initial_size = Some(size);
+
+        // This is the critical call that was missing in your original code
+        // SAFETY: caller guarantees the window is valid
+        unsafe {
+            self.plugin_gui.set_parent(plugin, parent)?;
         }
-        
-        // For embedded GUI, we would need to:
-        // 1. Get the window handle from the egui context
-        // 2. Set scaling if needed (not for X11/Wayland which use physical pixels)
-        // 3. Get initial size or set size
-        // 4. Set parent window
-        // 5. Show the GUI
-        
-        // For now, we'll just show it as a simple implementation
-        // A full implementation would require egui window handle integration
-        self.plugin_gui.show(plugin)?;
+
+        // Some plugins ignore show() errors, so we swallow it
+        let _ = self.plugin_gui.show(plugin);
         self.is_open = true;
 
-        Ok(())
+        Ok(size)
     }
 
-    /// Open the plugin's GUI as a floating window.
     pub fn open_floating(&mut self, plugin: &mut PluginMainThreadHandle) -> Result<(), GuiError> {
-        println!("[gui] Attempting to open floating GUI");
-        
-        // If no configuration supports floating, force it
         let configuration = match self.configuration {
-            Some(c) if c.is_floating => {
-                println!("[gui] Using existing floating configuration");
-                c
+            Some(c) if c.is_floating => c,
+            Some(c) => GuiConfiguration {
+                api_type: c.api_type,
+                is_floating: true,
             },
-            Some(c) => {
-                // Try floating anyway
-                let floating_config = GuiConfiguration {
-                    api_type: c.api_type,
-                    is_floating: true,
-                };
-                if self.plugin_gui.is_api_supported(plugin, floating_config) {
-                    println!("[gui] Plugin supports floating mode");
-                    floating_config
-                } else {
-                    // Last resort: just use what we have — some plugins accept create() with
-                    // floating even if is_api_supported returned false for it.
-                    println!("[gui] Forcing floating mode as last resort");
-                    floating_config
-                }
-            }
-            None => {
-                println!("[gui] No GUI configuration available");
-                return Err(GuiError::CreateError);
-            }
+            None => return Err(GuiError::CreateError),
         };
 
-        println!("[gui] Creating floating GUI with API type: {:?}", configuration.api_type);
-        match self.plugin_gui.create(plugin, configuration) {
-            Ok(()) => {
-                println!("[gui] GUI created successfully");
-            }
-            Err(e) => {
-                println!("[gui] Failed to create GUI: {:?}", e);
-                return Err(e);
-            }
-        }
-        
-        self.plugin_gui
-            .suggest_title(plugin, c"NIH-plug Playground");
+        self.plugin_gui.create(plugin, configuration)?;
+        self.plugin_gui.suggest_title(plugin, c"Plugin");
         self.plugin_gui.show(plugin)?;
         self.is_open = true;
-
         Ok(())
     }
 
-    /// Destroy the plugin's GUI resources if open.
+    /// Tell the plugin to resize. Returns the size it actually agreed to use.
+    pub fn resize(&mut self, plugin: &mut PluginMainThreadHandle, requested: GuiSize) -> GuiSize {
+        if !self.is_resizable {
+            return self.plugin_gui.get_size(plugin).unwrap_or(requested);
+        }
+        let working = self
+            .plugin_gui
+            .adjust_size(plugin, requested)
+            .unwrap_or(requested);
+        let _ = self.plugin_gui.set_size(plugin, working);
+        working
+    }
+
     pub fn destroy(&mut self, plugin: &mut PluginMainThreadHandle) {
         if self.is_open {
             self.plugin_gui.destroy(plugin);
             self.is_open = false;
+            self.initial_size = None;
         }
     }
 }

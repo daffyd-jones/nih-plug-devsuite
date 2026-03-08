@@ -3,6 +3,7 @@ use crate::midi_engine::MidiEngine;
 use crate::plugin_host::{HostStatus, PluginHost, PluginMode};
 use crate::ui::midi_panel::PianoWidget;
 use eframe::egui;
+use raw_window_handle::HasWindowHandle;
 
 /// The right-side panel showing plugin controls, piano, and MIDI monitor.
 pub struct PluginPanel {
@@ -23,6 +24,7 @@ impl PluginPanel {
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
+        frame: &mut eframe::Frame,
         plugin_host: &mut PluginHost,
         midi_engine: &MidiEngine,
         audio_running: bool,
@@ -83,18 +85,67 @@ impl PluginPanel {
         ui.add_space(4.0);
 
         // GUI button
+        // if plugin_host.is_gui_open() {
+        //     // Draw a titled frame around the plugin GUI area
+        //     egui::Frame::none()
+        //         .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 80, 100)))
+        //         .rounding(4.0)
+        //         .inner_margin(8.0)
+        //         .show(ui, |ui| {
+        //             // Header bar inside the frame
+        //             ui.horizontal(|ui| {
+        //                 ui.label(
+        //                     egui::RichText::new(
+        //                         plugin_host.plugin_name.as_deref().unwrap_or("Plugin GUI"),
+        //                     )
+        //                     .small()
+        //                     .color(egui::Color32::from_rgb(160, 160, 180)),
+        //                 );
+        //                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        //                     if ui.small_button("✕").clicked() {
+        //                         plugin_host.close_gui();
+        //                     }
+        //                 });
+        //             });
+
+        //             ui.separator();
+
+        //             // Reserve the space the plugin is drawing into
+        //             let desired_size = egui::vec2(640.0, 480.0);
+        //             let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+
+        //             // Subtle background so the region is visually distinct
+        //             ui.painter()
+        //                 .rect_filled(rect, 0.0, egui::Color32::from_rgb(20, 20, 25));
+        //         });
+        // } else
         if plugin_host.is_loaded() {
             ui.horizontal(|ui| {
                 if plugin_host.is_gui_open() {
                     if ui.button("Close GUI").clicked() {
                         plugin_host.close_gui();
                     }
-                } else {
-                    if ui.button("Open GUI").clicked() {
-                        if let Err(e) = plugin_host.open_gui() {
-                            eprintln!("[plugin_panel] GUI error: {e}");
+                } else if ui.button("Open GUI").clicked() {
+                    match frame.window_handle() {
+                        Ok(handle) => {
+                            if let Err(e) = plugin_host.open_gui(&handle) {
+                                eprintln!("[plugin_panel] GUI error: {e}");
+                            }
                         }
+                        Err(e) => eprintln!("Could not get window handle: {e}"),
                     }
+                    // if let Some(xid) = get_x11_window_id(frame) {
+                    //     let scale = ui.ctx().pixels_per_point();
+                    //     let rect = PhysRect {
+                    //         x: (plugin_rect.min.x * scale) as i16,
+                    //         y: (plugin_rect.min.y * scale) as i16,
+                    //         width: (plugin_rect.width() * scale) as u16,
+                    //         height: (plugin_rect.height() * scale) as u16,
+                    //     };
+                    //     if let Err(e) = plugin_host.open_gui_embedded(xid, rect) {
+                    //         eprintln!("{e}");
+                    //     }
+                    // }
                 }
 
                 if ui
