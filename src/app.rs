@@ -206,7 +206,7 @@ impl PlaygroundApp {
 }
 
 impl eframe::App for PlaygroundApp {
-    fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         // Poll plugin host main-thread tasks
         self.plugin_host.poll_main_thread();
 
@@ -483,13 +483,8 @@ impl eframe::App for PlaygroundApp {
             .min_width(400.0)
             .show(ctx, |ui| {
                 let audio_running = self.audio_engine.status == AudioStatus::Running;
-                self.plugin_panel.show(
-                    ui,
-                    frame,
-                    &mut self.plugin_host,
-                    &self.midi_engine,
-                    audio_running,
-                );
+                self.plugin_panel
+                    .show(ui, &mut self.plugin_host, &self.midi_engine, audio_running);
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {

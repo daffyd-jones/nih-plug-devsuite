@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod gui;
+pub mod gui_window;
 pub mod handlers;
 pub mod loader;
 pub mod midi_bridge;
@@ -9,21 +10,15 @@ pub mod timer;
 
 use crate::plugin_host::audio::{PluginAudioConfig, PluginAudioProcessor};
 use crate::plugin_host::gui::Gui;
+use crate::plugin_host::gui_window::PluginGuiWindow;
 use crate::plugin_host::handlers::{DevHost, DevHostMainThread, DevHostShared, MainThreadMessage};
-use crate::plugin_host::loader::PluginBinary;
 use crate::plugin_host::midi_bridge::RawMidiEvent;
-use crate::plugin_host::timer::Timers;
 
-use clack_extensions::gui::{GuiSize, Window as ClapWindow};
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::sync::Arc;
-use winit::window::Window as WinitWindow;
-
+use clack_extensions::gui::GuiSize;
 use clack_host::prelude::*;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostStatus {
@@ -61,6 +56,10 @@ pub struct PluginHost {
 
     // GUI state
     gui: Option<Gui>,
+    /// Our native window that the plugin embeds into. `None` when the
+    /// plugin is using a floating window (it owns that itself) or when
+    /// no GUI is open.
+    gui_window: Option<PluginGuiWindow>,
     gui_open: bool,
 
     // Path to loaded binary
@@ -81,6 +80,7 @@ impl PluginHost {
             main_thread_tx: tx,
             midi_producer: None,
             gui: None,
+            gui_window: None,
             gui_open: false,
             loaded_path: None,
         }
@@ -189,7 +189,7 @@ impl PluginHost {
             return;
         }
 
-        // Close GUI first
+        // Close GUI first (plugin child must die before its parent window)
         self.close_gui();
 
         // Drop instance (this deactivates if needed)
@@ -208,6 +208,7 @@ impl PluginHost {
 
     /// Poll main-thread messages — call every frame from the UI thread.
     pub fn poll_main_thread(&mut self) {
+        // ── Drain plugin→host messages ──
         while let Ok(msg) = self.main_thread_rx.try_recv() {
             match msg {
                 MainThreadMessage::RunOnMainThread => {
@@ -216,16 +217,27 @@ impl PluginHost {
                     }
                 }
                 MainThreadMessage::GuiClosed => {
+                    // Plugin closed its own (floating) window, or the
+                    // embedding connection broke. Either way, clean up.
+                    println!("[plugin_host] Plugin reported GUI closed");
                     self.gui_open = false;
-                    println!("[plugin_host] Plugin GUI closed by plugin");
+                    self.gui_window = None;
                 }
-                MainThreadMessage::GuiRequestResized { new_size: _ } => {
-                    // Floating windows handle their own sizing
+                MainThreadMessage::GuiRequestResized { new_size } => {
+                    self.handle_gui_resize_request(new_size);
                 }
             }
         }
 
-        // Tick timers
+        // ── Check if the user closed our native plugin window ──
+        // Borrow ends before close_gui() is called — NLL handles this.
+        let user_closed = self.gui_window.as_mut().map_or(false, |w| w.poll_events());
+        if user_closed {
+            println!("[plugin_host] User closed plugin window");
+            self.close_gui();
+        }
+
+        // ── Tick plugin timers ──
         if let Some(ref mut instance) = self.instance {
             let (timer_ext, timers) =
                 instance.access_handler(|h| (h.timer_support, h.timers.clone()));
@@ -235,108 +247,125 @@ impl PluginHost {
         }
     }
 
-    pub fn open_gui_embedded(&mut self, parent: impl HasWindowHandle) -> Result<GuiSize, String> {
-        if self.gui_open {
-            return Err("GUI already open".into());
+    /// Plugin asked to resize. Resize our host window to match, then tell
+    /// the plugin what size it actually got (CLAP requires this handshake).
+    fn handle_gui_resize_request(&mut self, requested: GuiSize) {
+        // Resize our native window first so the plugin has room to grow into.
+        if let Some(window) = self.gui_window.as_mut() {
+            window.resize(requested.width, requested.height);
         }
 
-        let raw = parent
-            .window_handle()
-            .map_err(|e| format!("No window handle: {e}"))?
-            .as_raw();
+        // Then confirm the size with the plugin. `Gui::resize` internally
+        // calls `adjust_size` + `set_size`, respecting the plugin's
+        // constraints. If we have no native window (floating mode) this
+        // still runs — the plugin manages its own window in that case.
+        if let (Some(gui), Some(instance)) = (self.gui.as_mut(), self.instance.as_mut()) {
+            let actual = gui.resize(&mut instance.plugin_handle(), requested);
 
-        let clap_window = match raw {
-            RawWindowHandle::Xlib(h) => ClapWindow::from_x11_handle(h.window),
-            RawWindowHandle::Xcb(h) => {
-                // xcb window IDs are compatible with xlib as c_ulong
-                ClapWindow::from_x11_handle(h.window.get() as _)
+            // If the plugin settled on a different size than requested
+            // (constrained by its own min/max), resize our window again
+            // to match exactly. Rare, but keeps them in sync.
+            if actual.width != requested.width || actual.height != requested.height {
+                if let Some(window) = self.gui_window.as_mut() {
+                    window.resize(actual.width, actual.height);
+                }
             }
-            RawWindowHandle::Win32(h) => ClapWindow::from_win32_hwnd(h.hwnd.get() as _),
-            RawWindowHandle::AppKit(h) => ClapWindow::from_cocoa_nsview(h.ns_view.as_ptr()),
-            other => {
-                return Err(format!(
-                    "Unsupported window type for CLAP embedding: {other:?}. \
-                 Try setting WINIT_UNIX_BACKEND=x11"
-                ))
-            }
-        };
-
-        let gui = self.gui.as_mut().ok_or("Plugin has no GUI")?;
-        let instance = self.instance.as_mut().ok_or("No plugin instance")?;
-
-        // let clap_window = ClapWindow::from_window(&parent)
-        //     .ok_or("Platform window type not supported by CLAP (Win32/Cocoa/X11 only)")?;
-
-        let size = unsafe {
-            gui.open_embedded(&mut instance.plugin_handle(), clap_window)
-                .map_err(|e| format!("Failed to open embedded GUI: {e}"))?
-        };
-
-        self.gui_open = true;
-        println!(
-            "[plugin_host] Opened embedded GUI ({}x{})",
-            size.width, size.height
-        );
-        Ok(size)
+        }
     }
 
-    // pub fn open_gui_embedded(&mut self, parent_xid: u32, rect: PhysRect) -> Result<(), String> {
-    //     let child_xid = make_child_window(parent_xid, rect.x, rect.y, rect.width, rect.height)?;
-
-    //     let clap_window = ClapWindow::from_x11_handle(child_xid as _);
-    //     let gui = self.gui.as_mut().ok_or("No GUI")?;
-    //     let instance = self.instance.as_mut().ok_or("No instance")?;
-
-    //     unsafe {
-    //         gui.open_embedded(&mut instance.plugin_handle(), clap_window)
-    //             .map_err(|e| format!("Embed failed: {e}"))?;
-    //     }
-
-    //     self.gui_open = true;
-    //     Ok(())
-    // }
-
-    /// Floating fallback — no window handle needed
-    pub fn open_gui_floating(&mut self) -> Result<(), String> {
+    /// Open the plugin GUI.
+    ///
+    /// * If the plugin supports **embedded** mode: create a dedicated native
+    ///   window, parent the plugin into it. We own the window; the plugin
+    ///   owns a child inside it.
+    /// * If the plugin only supports **floating** mode: let the plugin open
+    ///   its own window. We track no native window.
+    ///
+    /// No window handle needed from the caller — we make our own.
+    pub fn open_gui(&mut self) -> Result<(), String> {
         if self.gui_open {
             return Ok(());
         }
 
-        let gui = self.gui.as_mut().ok_or("Plugin has no GUI")?;
+        // Clone the name up front so we don't hold an immutable borrow of
+        // self.plugin_name while mutably borrowing self.gui/self.instance.
+        let title = self
+            .plugin_name
+            .clone()
+            .unwrap_or_else(|| "Plugin".to_string());
+
+        let gui = self.gui.as_mut().ok_or("Plugin has no GUI extension")?;
         let instance = self.instance.as_mut().ok_or("No plugin instance")?;
 
-        gui.open_floating(&mut instance.plugin_handle())
-            .map_err(|e| format!("Failed to open floating GUI: {e}"))?;
+        // ── Floating path: plugin handles everything itself ──
+        if gui.needs_floating() == Some(true) {
+            gui.open_floating(&mut instance.plugin_handle())
+                .map_err(|e| format!("Failed to open floating GUI: {e}"))?;
+            self.gui_open = true;
+            println!("[plugin_host] Opened floating GUI");
+            return Ok(());
+        }
 
+        // ── Embedded path: create → size → window → attach → show ──
+
+        // Phase 1: create the plugin GUI, ask how big it wants to be.
+        // After this succeeds, we MUST call gui.destroy() on any error
+        // path — CLAP requires destroy() after every successful create().
+        let size = gui
+            .create_for_embedding(&mut instance.plugin_handle())
+            .map_err(|e| format!("Plugin GUI create failed: {e}"))?;
+
+        // Phase 2: create our native host window at that size.
+        let window = match PluginGuiWindow::create(&title, size.width, size.height) {
+            Ok(w) => w,
+            Err(e) => {
+                // Roll back phase 1. gui.is_open was set inside
+                // create_for_embedding, so destroy() will fire.
+                gui.destroy(&mut instance.plugin_handle());
+                return Err(format!("Host window create failed: {e}"));
+            }
+        };
+
+        // Phase 3: parent the plugin into our window and show it.
+        // SAFETY: `window` outlives the plugin GUI because `close_gui()`
+        // and `unload()` both destroy the plugin GUI before dropping
+        // `self.gui_window`. The Drop order in this struct is irrelevant
+        // because we never rely on implicit drop for teardown.
+        let attach_result =
+            unsafe { gui.attach_and_show(&mut instance.plugin_handle(), window.clap_window()) };
+        if let Err(e) = attach_result {
+            // Roll back phases 1 & 2.
+            gui.destroy(&mut instance.plugin_handle());
+            // `window` drops here → native window destroyed.
+            return Err(format!("Plugin GUI attach failed: {e}"));
+        }
+
+        self.gui_window = Some(window);
         self.gui_open = true;
-        println!("[plugin_host] Opened floating GUI");
+        println!(
+            "[plugin_host] Opened embedded GUI in native window ({}x{})",
+            size.width, size.height
+        );
         Ok(())
     }
 
-    /// Dispatch to the right path based on what the plugin supports
-    pub fn open_gui<W: HasWindowHandle>(&mut self, parent_window: &W) -> Result<(), String> {
-        match self.gui.as_ref().and_then(|g| g.needs_floating()) {
-            Some(false) => {
-                // Try embedded, fall back to floating
-                match self.open_gui_embedded(parent_window) {
-                    Ok(_size) => Ok(()),
-                    Err(e) => {
-                        println!("[plugin_host] Embedded failed ({e}), trying floating");
-                        self.open_gui_floating()
-                    }
-                }
-            }
-            _ => self.open_gui_floating(),
-        }
-    }
-    /// Close the plugin's GUI.
+    /// Close the plugin GUI. Safe to call when already closed.
+    ///
+    /// Teardown order is load-bearing:
+    ///   1. `plugin_gui.destroy()` — plugin frees its child window
+    ///   2. drop `gui_window` — our native window is destroyed
+    /// Reversing this lets the plugin paint into a freed HWND/XID.
     pub fn close_gui(&mut self) {
         if !self.gui_open {
             return;
         }
+
         if let (Some(gui), Some(instance)) = (self.gui.as_mut(), self.instance.as_mut()) {
             gui.destroy(&mut instance.plugin_handle());
         }
+
+        // Native window dies here via Drop.
+        self.gui_window = None;
         self.gui_open = false;
     }
 
@@ -344,7 +373,8 @@ impl PluginHost {
         self.gui_open
     }
 
-    /// Send a MIDI note-on to the plugin via the ring buffer.
+    // ── MIDI passthrough to the audio-thread ring buffer ─────────────────────
+
     pub fn send_note_on(&mut self, channel: u8, note: u8, velocity: u8) {
         if let Some(ref mut producer) = self.midi_producer {
             let _ = producer.push(RawMidiEvent {
@@ -354,7 +384,6 @@ impl PluginHost {
         }
     }
 
-    /// Send a MIDI note-off to the plugin via the ring buffer.
     pub fn send_note_off(&mut self, channel: u8, note: u8) {
         if let Some(ref mut producer) = self.midi_producer {
             let _ = producer.push(RawMidiEvent {
@@ -364,7 +393,6 @@ impl PluginHost {
         }
     }
 
-    /// Send raw MIDI bytes to the plugin via the ring buffer.
     pub fn send_raw_midi(&mut self, bytes: &[u8]) {
         if bytes.len() > 3 || bytes.is_empty() {
             return;
@@ -383,39 +411,4 @@ impl PluginHost {
         self.status != HostStatus::Unloaded
     }
 }
-/// Minimal helper - creates a positioned X11 child window and returns its ID.
-fn make_child_window(parent_xid: u32, x: i16, y: i16, w: u16, h: u16) -> Result<u32, String> {
-    use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::*;
-    use x11rb::rust_connection::RustConnection;
 
-    let (conn, screen_num) =
-        RustConnection::connect(None).map_err(|e| format!("X11 connect failed: {e}"))?;
-    let screen = &conn.setup().roots[screen_num];
-    let id = conn.generate_id().map_err(|e| format!("{e}"))?;
-
-    conn.create_window(
-        x11rb::COPY_DEPTH_FROM_PARENT,
-        id,
-        parent_xid,
-        x,
-        y,
-        w,
-        h,
-        0,
-        WindowClass::INPUT_OUTPUT,
-        screen.root_visual,
-        &CreateWindowAux::new().background_pixel(screen.black_pixel),
-    )
-    .map_err(|e| format!("{e}"))?
-    .check()
-    .map_err(|e| format!("{e}"))?;
-
-    conn.map_window(id)
-        .map_err(|e| format!("{e}"))?
-        .check()
-        .map_err(|e| format!("{e}"))?;
-    conn.flush().map_err(|e| format!("{e}"))?;
-
-    Ok(id)
-}

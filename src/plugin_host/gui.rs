@@ -60,49 +60,58 @@ impl Gui {
         self.configuration.map(|c| c.is_floating)
     }
 
-    /// Open as embedded, parenting into the provided raw window handle.
+    /// Phase 1 of embedded open: create the plugin GUI and query its
+    /// preferred size. Call this **before** creating your host window so
+    /// you know how big to make it.
     ///
-    /// Returns the size the plugin wants to occupy, so the caller can
-    /// resize its container accordingly.
-    ///
-    /// # Safety
-    /// The caller must ensure the parent window outlives this GUI.
-    pub unsafe fn open_embedded(
+    /// After this returns `Ok`, `self.is_open` is `true` and you **must**
+    /// eventually call `destroy()` — even if `attach_and_show()` later
+    /// fails. CLAP mandates `destroy()` after every successful `create()`.
+    pub fn create_for_embedding(
         &mut self,
         plugin: &mut PluginMainThreadHandle,
-        parent: ClapWindow,
     ) -> Result<GuiSize, GuiError> {
-        let configuration = match self.configuration {
-            Some(c) if !c.is_floating => c,
-            _ => {
-                println!("[gui] No embedded configuration available");
-                return Err(GuiError::CreateError);
-            }
-        };
+        let configuration = self
+            .configuration
+            .filter(|c| !c.is_floating)
+            .ok_or(GuiError::CreateError)?;
 
         self.plugin_gui.create(plugin, configuration)?;
 
-        // Check resize capability before set_parent
-        self.is_resizable = self.plugin_gui.can_resize(plugin);
+        // Set this immediately after create() succeeds, not after show().
+        // If the caller bails between here and attach_and_show(), they
+        // call destroy() and this flag makes that work.
+        // (Note: open_floating() has the same latent issue — it sets
+        //  is_open only after show(). Left as-is for now since we're not
+        //  touching the floating path.)
+        self.is_open = true;
 
-        // Get plugin's preferred size (fall back to a sane default)
+        self.is_resizable = self.plugin_gui.can_resize(plugin);
         let size = self.plugin_gui.get_size(plugin).unwrap_or(GuiSize {
             width: 640,
             height: 480,
         });
         self.initial_size = Some(size);
-
-        // This is the critical call that was missing in your original code
-        // SAFETY: caller guarantees the window is valid
-        unsafe {
-            self.plugin_gui.set_parent(plugin, parent)?;
-        }
-
-        // Some plugins ignore show() errors, so we swallow it
-        let _ = self.plugin_gui.show(plugin);
-        self.is_open = true;
-
         Ok(size)
+    }
+
+    /// Phase 2 of embedded open: parent the plugin into the host window
+    /// and show it.
+    ///
+    /// # Safety
+    /// The caller guarantees `parent` refers to a window that will outlive
+    /// this `Gui` — i.e. it won't be destroyed until after `destroy()` has
+    /// been called on this struct.
+    pub unsafe fn attach_and_show(
+        &mut self,
+        plugin: &mut PluginMainThreadHandle,
+        parent: ClapWindow,
+    ) -> Result<(), GuiError> {
+        self.plugin_gui.set_parent(plugin, parent)?;
+        // Some plugins return an error from show() but still display fine.
+        // Swallow it like the old open_embedded did.
+        let _ = self.plugin_gui.show(plugin);
+        Ok(())
     }
 
     pub fn open_floating(&mut self, plugin: &mut PluginMainThreadHandle) -> Result<(), GuiError> {

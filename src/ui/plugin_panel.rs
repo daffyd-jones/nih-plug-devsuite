@@ -3,7 +3,7 @@ use crate::midi_engine::MidiEngine;
 use crate::plugin_host::{HostStatus, PluginHost, PluginMode};
 use crate::ui::midi_panel::PianoWidget;
 use eframe::egui;
-use raw_window_handle::HasWindowHandle;
+// use raw_window_handle::HasWindowHandle;
 
 /// The right-side panel showing plugin controls, piano, and MIDI monitor.
 pub struct PluginPanel {
@@ -24,7 +24,7 @@ impl PluginPanel {
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        frame: &mut eframe::Frame,
+        // frame: &mut eframe::Frame,
         plugin_host: &mut PluginHost,
         midi_engine: &MidiEngine,
         audio_running: bool,
@@ -119,6 +119,7 @@ impl PluginPanel {
         //                 .rect_filled(rect, 0.0, egui::Color32::from_rgb(20, 20, 25));
         //         });
         // } else
+
         if plugin_host.is_loaded() {
             ui.horizontal(|ui| {
                 if plugin_host.is_gui_open() {
@@ -126,26 +127,11 @@ impl PluginPanel {
                         plugin_host.close_gui();
                     }
                 } else if ui.button("Open GUI").clicked() {
-                    match frame.window_handle() {
-                        Ok(handle) => {
-                            if let Err(e) = plugin_host.open_gui(&handle) {
-                                eprintln!("[plugin_panel] GUI error: {e}");
-                            }
-                        }
-                        Err(e) => eprintln!("Could not get window handle: {e}"),
+                    // No window handle plumbing — PluginHost creates its
+                    // own native window.
+                    if let Err(e) = plugin_host.open_gui() {
+                        eprintln!("[plugin_panel] Failed to open GUI: {e}");
                     }
-                    // if let Some(xid) = get_x11_window_id(frame) {
-                    //     let scale = ui.ctx().pixels_per_point();
-                    //     let rect = PhysRect {
-                    //         x: (plugin_rect.min.x * scale) as i16,
-                    //         y: (plugin_rect.min.y * scale) as i16,
-                    //         width: (plugin_rect.width() * scale) as u16,
-                    //         height: (plugin_rect.height() * scale) as u16,
-                    //     };
-                    //     if let Err(e) = plugin_host.open_gui_embedded(xid, rect) {
-                    //         eprintln!("{e}");
-                    //     }
-                    // }
                 }
 
                 if ui
